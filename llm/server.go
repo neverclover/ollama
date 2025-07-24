@@ -634,6 +634,7 @@ func (s *ollamaServer) Load(ctx context.Context, gpus discover.GpuInfoList, requ
 		slog.Info("loading with num_gpu set", "num_gpu", s.options.NumGPU)
 	}
 
+	pastAllocations := make(map[uint64]struct{})
 	var backoff float32
 
 	gpuLayers, err := s.fitGPU(systemInfo, gpus, s.mem, requireFull, backoff)
@@ -646,9 +647,6 @@ func (s *ollamaServer) Load(ctx context.Context, gpus discover.GpuInfoList, requ
 	}
 
 	for operation := LoadOperationFit; operation < LoadOperationCommit; operation++ {
-		pastAllocations := make(map[uint64]bool)
-		var bestAllocation ml.GPULayersList
-
 		for {
 			s.loadRequest.GPULayers = gpuLayers
 			resp, err := s.initModel(ctx, s.loadRequest, operation)
@@ -658,17 +656,7 @@ func (s *ollamaServer) Load(ctx context.Context, gpus discover.GpuInfoList, requ
 
 			slog.Debug("memory", "success", resp.Success, "required", resp.Memory)
 
-			pastAllocations[gpuLayers.Hash()] = resp.Success
-
-			// Don't consider layouts done without model memory data as candidates for best
-			// because they may have put more on the GPU than we think is good. If we do
-			// get a good layout, use the most recent one since we get better information
-			// over time.
-			if operation == LoadOperationAlloc && resp.Success &&
-				s.mem != nil && gpuLayers.Sum() >= bestAllocation.Sum() {
-				bestAllocation = gpuLayers
-			}
-
+			pastAllocations[gpuLayers.Hash()] = struct{}{}
 			s.mem = &resp.Memory
 
 		layout:
@@ -679,16 +667,12 @@ func (s *ollamaServer) Load(ctx context.Context, gpus discover.GpuInfoList, requ
 
 			slog.Debug("new layout created", "layers", newGPULayers)
 
-			if success, ok := pastAllocations[newGPULayers.Hash()]; ok {
-				if bestAllocation != nil {
-					// We repeated a previous memory layout - use the best allocation that we've seen so far.
-					gpuLayers = bestAllocation
-					break
-				} else if success {
-					// We didn't originally consider this layout as a possibility for best because it was done
-					// without full memory data but it succeeded and we came up with the same layout again
-					// (with data) so go ahead and use it.
-					gpuLayers = newGPULayers
+			// We get additional memory information over time, which will reduce the number of
+			// layers that can fit, so fewer layers is actually better. If the number of layers
+			// offloaded in a new layout increases, that means we've looped.
+			if _, ok := pastAllocations[newGPULayers.Hash()]; newGPULayers.Sum() > gpuLayers.Sum() || ok {
+				// If we repeat a layout, use the last one before the repeat, which is already allocated.
+				if resp.Success {
 					break
 				}
 
