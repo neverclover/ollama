@@ -4,10 +4,11 @@
   </a>
 </div>
 
-# Ollama
+# Ollama-on-k80
 
 Get up and running with large language models.
-
+Added support for CUDA V11/Tesla K80
+Latest version:v0.10.0 rc2
 ### macOS
 
 [Download](https://ollama.com/download/Ollama.dmg)
